@@ -97,8 +97,7 @@ lib/
 
 1. Clone the repository:
 ```bash
-git clone <your-repo-link>
-cd daraz_flutter
-cd daraz_flutter
+git clone https://github.com/nuaiman/flutter_fakestore_shop_feb26.git
+cd <in to project>
 flutter run
 ```
