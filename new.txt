@@ -1,0 +1,1294 @@
+tree /f
+├───lib
+│   │   main.dart
+│   │
+│   ├───core
+│   │   ├───constants
+│   │   │       base_urls.dart
+│   │   │
+│   │   └───services
+│   │           dio_service.dart
+│   │           shared_preferences_service.dart
+│   │
+│   ├───features
+│   │   ├───auth
+│   │   │   ├───apis
+│   │   │   │       local_auth_api.dart
+│   │   │   │       remote_auth_api.dart
+│   │   │   │
+│   │   │   └───notifiers
+│   │   │           auth_notifier.dart
+│   │   │
+│   │   └───products
+│   │       ├───apis
+│   │       │       local_products_api.dart
+│   │       │       remote_products_api.dart
+│   │       │
+│   │       └───notifiers
+│   │               local_products_notifier.dart
+│   │               remote_products_notifier.dart
+│   │
+│   ├───models
+│   │       product.dart
+│   │       user.dart
+│   │
+│   └───screens
+│       ├───auth
+│       │       login_screen.dart
+│       │       profile_screen.dart
+│       │
+│       └───products
+│               products_screen.dart
+
+
+main
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'core/services/shared_preferences_service.dart';
+import 'screens/products/products_screen.dart';
+
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  final prefs = await SharedPreferences.getInstance();
+
+  runApp(
+    ProviderScope(
+      overrides: [sharedPreferencesProvider.overrideWithValue(prefs)],
+      child: const MyApp(),
+    ),
+  );
+}
+
+class MyApp extends StatelessWidget {
+  const MyApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      debugShowCheckedModeBanner: false,
+      title: 'Flutter Demo',
+      theme: ThemeData(
+        appBarTheme: const AppBarTheme(backgroundColor: Colors.white),
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: Colors.deepPurple,
+        ).copyWith(surface: Colors.white),
+      ),
+      home: const ProductsScreen(),
+    );
+  }
+}
+
+
+base_urls
+const String baseUrlHTTP = 'https://fakestoreapi.com';
+
+
+dio_service
+import 'package:dio/dio.dart';
+import '../constants/base_urls.dart';
+
+class DioService {
+  static final DioService instance = DioService._internal();
+
+  late final Dio dio;
+
+  DioService._internal() {
+    dio = Dio(
+      BaseOptions(
+        connectTimeout: Duration(seconds: 5),
+        receiveTimeout: Duration(seconds: 5),
+        baseUrl: baseUrlHTTP,
+        headers: {'Content-Type': 'application/json'},
+      ),
+    );
+
+    dio.interceptors.add(LogInterceptor(requestBody: true, responseBody: true));
+  }
+
+  static Dio get client => instance.dio;
+}
+
+
+shared_preferences_service
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+final sharedPreferencesProvider = Provider<SharedPreferences>((ref) {
+  throw UnimplementedError(
+    'SharedPreferences must be overridden in ProviderScope',
+  );
+});
+
+
+local_auth_api
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import '../../../core/services/shared_preferences_service.dart';
+
+class LocalAuthApi {
+  static const _tokenKey = "auth_token";
+
+  final SharedPreferences prefs;
+
+  LocalAuthApi(this.prefs);
+
+  Future<void> saveToken(String token) async {
+    await prefs.setString(_tokenKey, token);
+  }
+
+  String? getToken() {
+    return prefs.getString(_tokenKey);
+  }
+
+  Future<void> clearToken() async {
+    await prefs.remove(_tokenKey);
+  }
+}
+
+final localAuthApiProvider = Provider<LocalAuthApi>((ref) {
+  final prefs = ref.read(sharedPreferencesProvider);
+  return LocalAuthApi(prefs);
+});
+
+
+remote_auth_api
+import 'package:dio/dio.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../../core/services/dio_service.dart';
+
+class RemoteAuthApi {
+  final Dio _dio = DioService.client;
+
+  Future<String> login({
+    required String username,
+    required String password,
+  }) async {
+    final response = await _dio.post(
+      '/auth/login',
+      data: {"username": username, "password": password},
+    );
+
+    if (response.statusCode != 201) {
+      throw Exception("Login failed");
+    }
+
+    return response.data["token"];
+  }
+
+  Future<Map<String, dynamic>> fetchUser(int id) async {
+    final response = await _dio.get('/users/$id');
+
+    if (response.statusCode != 200) {
+      throw Exception("Failed to fetch user");
+    }
+
+    return response.data;
+  }
+}
+
+final remoteAuthApiProvider = Provider<RemoteAuthApi>((ref) {
+  return RemoteAuthApi();
+});
+
+
+auth_notifier
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../../models/user.dart';
+import '../apis/local_auth_api.dart';
+import '../apis/remote_auth_api.dart';
+
+class AuthNotifier extends AsyncNotifier<User?> {
+  late final RemoteAuthApi _remoteApi;
+  late final LocalAuthApi _localApi;
+
+  @override
+  Future<User?> build() async {
+    _remoteApi = ref.read(remoteAuthApiProvider);
+    _localApi = ref.read(localAuthApiProvider);
+
+    final token = _localApi.getToken();
+    if (token == null) return null;
+
+    try {
+      final userMap = await _remoteApi.fetchUser(1);
+      return User.fromMap(userMap);
+    } catch (_) {
+      await _localApi.clearToken();
+      return null;
+    }
+  }
+
+  bool get isAuthenticated => _localApi.getToken() != null;
+
+  Future<void> login(String username, String password) async {
+    state = const AsyncValue.loading();
+
+    try {
+      final token = await _remoteApi.login(
+        username: username,
+        password: password,
+      );
+
+      await _localApi.saveToken(token);
+
+      final userMap = await _remoteApi.fetchUser(1);
+      final user = User.fromMap(userMap);
+
+      state = AsyncValue.data(user);
+    } catch (e, st) {
+      state = AsyncValue.error(e, st);
+    }
+  }
+
+  Future<void> logout() async {
+    await _localApi.clearToken();
+    state = const AsyncValue.data(null);
+  }
+}
+
+final authNotifierProvider = AsyncNotifierProvider<AuthNotifier, User?>(
+  AuthNotifier.new,
+);
+
+
+local_products_api
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import '../../../core/services/shared_preferences_service.dart';
+
+class LocalProductsApi {
+  static const _key = 'saved_product_ids';
+  final SharedPreferences prefs;
+
+  LocalProductsApi(this.prefs);
+
+  Set<int> getSavedIds() {
+    final ids = prefs.getStringList(_key) ?? [];
+    return ids.map(int.parse).toSet();
+  }
+
+  Future<void> saveIds(Set<int> ids) async {
+    await prefs.setStringList(_key, ids.map((e) => e.toString()).toList());
+  }
+}
+
+final localProductsApiProvider = Provider<LocalProductsApi>((ref) {
+  final prefs = ref.read(sharedPreferencesProvider);
+  return LocalProductsApi(prefs);
+});
+
+
+remote_products_api
+import 'package:dio/dio.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../../core/services/dio_service.dart';
+import '../../../models/product.dart';
+
+class RemoteProductsApi {
+  final Dio _dio = DioService.client;
+
+  Future<List<Product>> fetchProducts() async {
+    final response = await _dio.get('/products');
+
+    if (response.statusCode != 200) {
+      throw Exception('Failed to fetch products: ${response.statusCode}');
+    }
+
+    final data = response.data;
+    if (data is! List) throw Exception('Invalid API response');
+
+    return data
+        .map<Product>((json) => Product.fromMap(json as Map<String, dynamic>))
+        .toList();
+  }
+}
+
+// -----------------------------------------------------------------------------
+final remoteProductsApiProvider = Provider((ref) {
+  return RemoteProductsApi();
+});
+
+
+local_products_notifier
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../apis/local_products_api.dart';
+import '../../../models/product.dart';
+import 'remote_products_notifier.dart';
+
+class LocalProductsNotifier extends AsyncNotifier<List<Product>> {
+  late final LocalProductsApi _localApi;
+  late final RemoteProductsNotifier _remoteNotifier;
+
+  String? _selectedCategory;
+  String? _searchQuery;
+
+  @override
+  Future<List<Product>> build() async {
+    _localApi = ref.read(localProductsApiProvider);
+    _remoteNotifier = ref.read(remoteProductsNotifierProvider.notifier);
+
+    ref.listen<AsyncValue<List<Product>>>(remoteProductsNotifierProvider, (
+      _,
+      _,
+    ) {
+      fetchLocalProducts();
+    });
+
+    return await fetchLocalProducts();
+  }
+
+  /// Fetch saved products by combining local IDs with remote products
+  Future<List<Product>> fetchLocalProducts() async {
+    final savedIds = _localApi.getSavedIds();
+
+    if (savedIds.isEmpty) {
+      state = const AsyncValue.data([]);
+      return [];
+    }
+
+    final remoteProducts = _remoteNotifier.state.value ?? [];
+
+    final savedProducts = remoteProducts
+        .where((p) => savedIds.contains(p.id))
+        .toList();
+
+    state = AsyncValue.data(savedProducts);
+    return savedProducts;
+  }
+
+  /// Returns all unique categories from saved products
+  List<String> getCategories() {
+    final products = state.value ?? [];
+    final categories = products.map((p) => p.category).toSet().toList();
+    categories.sort();
+    return categories;
+  }
+
+  void setSelectedCategory(String? category) => _selectedCategory = category;
+  String? getSelectedCategory() => _selectedCategory;
+
+  void setSearchQuery(String? query) => _searchQuery = query;
+
+  /// Filter saved products based on category & search query
+  List<Product> getFilteredProducts() {
+    final products = state.value ?? [];
+    return products.where((p) {
+      final matchesCategory =
+          _selectedCategory == null || p.category == _selectedCategory;
+      final matchesSearch =
+          _searchQuery == null ||
+          p.title.toLowerCase().contains(_searchQuery!.toLowerCase());
+      return matchesCategory && matchesSearch;
+    }).toList();
+  }
+
+  /// Toggle saved status of a product
+  Future<void> toggleSaved(int productId) async {
+    final currentProducts = state.value ?? [];
+    final currentIds = currentProducts.map((p) => p.id).toSet();
+    final updatedIds = {...currentIds};
+
+    if (updatedIds.contains(productId)) {
+      updatedIds.remove(productId);
+    } else {
+      updatedIds.add(productId);
+    }
+
+    await _localApi.saveIds(updatedIds);
+
+    final remoteProducts = _remoteNotifier.state.value ?? [];
+    final updatedProducts = remoteProducts
+        .where((p) => updatedIds.contains(p.id))
+        .toList();
+
+    state = AsyncValue.data(updatedProducts);
+  }
+}
+
+final localProductsNotifierProvider =
+    AsyncNotifierProvider<LocalProductsNotifier, List<Product>>(
+      LocalProductsNotifier.new,
+    );
+
+
+remote_products_notifier
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../apis/remote_products_api.dart';
+import '../../../models/product.dart';
+
+class RemoteProductsNotifier extends AsyncNotifier<List<Product>> {
+  late final RemoteProductsApi _remoteApi;
+
+  String? _selectedCategory;
+  String? _searchQuery;
+
+  @override
+  Future<List<Product>> build() async {
+    _remoteApi = ref.read(remoteProductsApiProvider);
+    return await fetchRemoteProducts();
+  }
+
+  /// Fetch remote products
+  Future<List<Product>> fetchRemoteProducts() async {
+    state = const AsyncValue.loading();
+    final products = await _remoteApi.fetchProducts();
+    state = AsyncValue.data(products);
+    return products;
+  }
+
+  /// Returns all unique categories
+  List<String> getCategories() {
+    final products = state.value ?? [];
+    final categories = products.map((p) => p.category).toSet().toList();
+    categories.sort();
+    return categories;
+  }
+
+  void setSelectedCategory(String? category) => _selectedCategory = category;
+  String? getSelectedCategory() => _selectedCategory;
+
+  void setSearchQuery(String? query) => _searchQuery = query;
+
+  /// Filter products based on category & search query
+  List<Product> getFilteredProducts() {
+    final products = state.value ?? [];
+    return products.where((p) {
+      final matchesCategory =
+          _selectedCategory == null || p.category == _selectedCategory;
+      final matchesSearch =
+          _searchQuery == null ||
+          p.title.toLowerCase().contains(_searchQuery!.toLowerCase());
+      return matchesCategory && matchesSearch;
+    }).toList();
+  }
+}
+
+final remoteProductsNotifierProvider =
+    AsyncNotifierProvider<RemoteProductsNotifier, List<Product>>(
+      RemoteProductsNotifier.new,
+    );
+
+
+product
+import 'dart:convert';
+
+class Product {
+  final int id;
+  final String title;
+  final String category;
+  final double price;
+  final String description;
+  final String image;
+  Product({
+    required this.id,
+    required this.title,
+    required this.category,
+    required this.price,
+    required this.description,
+    required this.image,
+  });
+
+  Product copyWith({
+    int? id,
+    String? title,
+    String? category,
+    double? price,
+    String? description,
+    String? image,
+  }) {
+    return Product(
+      id: id ?? this.id,
+      title: title ?? this.title,
+      category: category ?? this.category,
+      price: price ?? this.price,
+      description: description ?? this.description,
+      image: image ?? this.image,
+    );
+  }
+
+  Map<String, dynamic> toMap() {
+    final result = <String, dynamic>{};
+
+    result.addAll({'id': id});
+    result.addAll({'title': title});
+    result.addAll({'category': category});
+    result.addAll({'price': price});
+    result.addAll({'description': description});
+    result.addAll({'image': image});
+
+    return result;
+  }
+
+  factory Product.fromMap(Map<String, dynamic> map) {
+    return Product(
+      id: map['id']?.toInt() ?? 0,
+      title: map['title'] ?? '',
+      category: map['category'] ?? '',
+      price: map['price']?.toDouble() ?? 0.0,
+      description: map['description'] ?? '',
+      image: map['image'] ?? '',
+    );
+  }
+
+  String toJson() => json.encode(toMap());
+
+  factory Product.fromJson(String source) =>
+      Product.fromMap(json.decode(source));
+
+  @override
+  String toString() {
+    return 'Product(id: $id, title: $title, category: $category, price: $price, description: $description, image: $image)';
+  }
+
+  @override
+  bool operator ==(Object other) {
+    if (identical(this, other)) return true;
+
+    return other is Product &&
+        other.id == id &&
+        other.title == title &&
+        other.category == category &&
+        other.price == price &&
+        other.description == description &&
+        other.image == image;
+  }
+
+  @override
+  int get hashCode {
+    return id.hashCode ^
+        title.hashCode ^
+        category.hashCode ^
+        price.hashCode ^
+        description.hashCode ^
+        image.hashCode;
+  }
+}
+
+
+user
+class User {
+  final int id;
+  final String email;
+  final String username;
+  final Name name;
+  final Address address;
+  final String phone;
+
+  User({
+    required this.id,
+    required this.email,
+    required this.username,
+    required this.name,
+    required this.address,
+    required this.phone,
+  });
+
+  factory User.fromMap(Map<String, dynamic> map) {
+    return User(
+      id: map['id'],
+      email: map['email'],
+      username: map['username'],
+      name: Name.fromMap(map['name']),
+      address: Address.fromMap(map['address']),
+      phone: map['phone'],
+    );
+  }
+
+  Map<String, dynamic> toMap() {
+    return {
+      'id': id,
+      'email': email,
+      'username': username,
+      'name': name.toMap(),
+      'address': address.toMap(),
+      'phone': phone,
+    };
+  }
+
+  String get fullName => "${name.firstName} ${name.lastName}";
+}
+
+class Name {
+  final String firstName;
+  final String lastName;
+
+  Name({required this.firstName, required this.lastName});
+
+  factory Name.fromMap(Map<String, dynamic> map) {
+    return Name(firstName: map['firstname'], lastName: map['lastname']);
+  }
+
+  Map<String, dynamic> toMap() {
+    return {'firstname': firstName, 'lastname': lastName};
+  }
+}
+
+class Address {
+  final String city;
+  final String street;
+  final int number;
+  final String zipcode;
+  final GeoLocation geolocation;
+
+  Address({
+    required this.city,
+    required this.street,
+    required this.number,
+    required this.zipcode,
+    required this.geolocation,
+  });
+
+  factory Address.fromMap(Map<String, dynamic> map) {
+    return Address(
+      city: map['city'],
+      street: map['street'],
+      number: map['number'],
+      zipcode: map['zipcode'],
+      geolocation: GeoLocation.fromMap(map['geolocation']),
+    );
+  }
+
+  Map<String, dynamic> toMap() {
+    return {
+      'city': city,
+      'street': street,
+      'number': number,
+      'zipcode': zipcode,
+      'geolocation': geolocation.toMap(),
+    };
+  }
+}
+
+class GeoLocation {
+  final String lat;
+  final String long;
+
+  GeoLocation({required this.lat, required this.long});
+
+  factory GeoLocation.fromMap(Map<String, dynamic> map) {
+    return GeoLocation(lat: map['lat'], long: map['long']);
+  }
+
+  Map<String, dynamic> toMap() {
+    return {'lat': lat, 'long': long};
+  }
+}
+
+
+login_screen
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../features/auth/notifiers/auth_notifier.dart';
+import 'profile_screen.dart';
+
+/// -----------------------------
+/// LOGIN SCREEN
+/// -----------------------------
+class LoginScreen extends ConsumerStatefulWidget {
+  const LoginScreen({super.key});
+
+  @override
+  ConsumerState<LoginScreen> createState() => _LoginScreenState();
+}
+
+class _LoginScreenState extends ConsumerState<LoginScreen> {
+  final _usernameController = TextEditingController(text: 'johnd');
+  final _passwordController = TextEditingController(text: 'm38rmF\$');
+  final _formKey = GlobalKey<FormState>();
+
+  @override
+  void dispose() {
+    _usernameController.dispose();
+    _passwordController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _login() async {
+    if (!_formKey.currentState!.validate()) return;
+
+    final username = _usernameController.text.trim();
+    final password = _passwordController.text.trim();
+
+    await ref.read(authNotifierProvider.notifier).login(username, password);
+
+    final isAuth = ref.read(authNotifierProvider.notifier).isAuthenticated;
+    if (isAuth) {
+      // Navigate to profile screen
+      if (mounted) {
+        Navigator.of(context).pushReplacement(
+          MaterialPageRoute(builder: (_) => const ProfileScreen()),
+        );
+      }
+    } else {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Login failed')));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final authState = ref.watch(authNotifierProvider);
+
+    return Scaffold(
+      appBar: AppBar(title: const Text('Login')),
+      body: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: authState.isLoading
+              ? const CircularProgressIndicator()
+              : Form(
+                  key: _formKey,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      TextFormField(
+                        controller: _usernameController,
+                        decoration: const InputDecoration(
+                          labelText: 'Username',
+                        ),
+                        validator: (v) =>
+                            v == null || v.isEmpty ? 'Enter username' : null,
+                      ),
+                      const SizedBox(height: 12),
+                      TextFormField(
+                        controller: _passwordController,
+                        obscureText: true,
+                        decoration: const InputDecoration(
+                          labelText: 'Password',
+                        ),
+                        validator: (v) =>
+                            v == null || v.isEmpty ? 'Enter password' : null,
+                      ),
+                      const SizedBox(height: 20),
+                      ElevatedButton(
+                        onPressed: _login,
+                        child: const Text('Login'),
+                      ),
+                    ],
+                  ),
+                ),
+        ),
+      ),
+    );
+  }
+}
+
+
+profile_screen
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../features/auth/notifiers/auth_notifier.dart';
+import 'login_screen.dart';
+
+class ProfileScreen extends ConsumerWidget {
+  const ProfileScreen({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final authState = ref.watch(authNotifierProvider);
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text(
+          'Profile',
+          style: TextStyle(fontWeight: FontWeight.bold),
+        ),
+        centerTitle: true,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.logout),
+            tooltip: 'Logout',
+            onPressed: () async {
+              await ref.read(authNotifierProvider.notifier).logout();
+              if (context.mounted) {
+                Navigator.of(context).pushReplacement(
+                  MaterialPageRoute(builder: (_) => const LoginScreen()),
+                );
+              }
+            },
+          ),
+        ],
+      ),
+      body: authState.when(
+        loading: () => const Center(child: CircularProgressIndicator()),
+        error: (e, st) => Center(
+          child: Text('Error: $e', style: const TextStyle(color: Colors.red)),
+        ),
+        data: (user) {
+          if (user == null) {
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              Navigator.of(context).pushReplacement(
+                MaterialPageRoute(builder: (_) => const LoginScreen()),
+              );
+            });
+            return const SizedBox.shrink();
+          }
+
+          return SingleChildScrollView(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              children: [
+                // Avatar
+                CircleAvatar(
+                  radius: 50,
+                  backgroundColor: Colors.blue.shade200,
+                  child: Text(
+                    user.username[0].toUpperCase(),
+                    style: const TextStyle(fontSize: 40, color: Colors.white),
+                  ),
+                ),
+                const SizedBox(height: 16),
+
+                Text(
+                  user.fullName,
+                  style: const TextStyle(
+                    fontSize: 24,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Text(user.email, style: TextStyle(color: Colors.grey.shade700)),
+                const SizedBox(height: 24),
+
+                Card.outlined(
+                  elevation: 1,
+                  child: Column(
+                    children: [
+                      ListTile(
+                        leading: const Icon(Icons.person),
+                        title: const Text('Username'),
+                        subtitle: Text(user.username),
+                      ),
+                      const Divider(),
+                      ListTile(
+                        leading: const Icon(Icons.phone),
+                        title: const Text('Phone'),
+                        subtitle: Text(user.phone),
+                      ),
+                      const Divider(),
+                      ListTile(
+                        leading: const Icon(Icons.location_city),
+                        title: const Text('Address'),
+                        subtitle: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              '${user.address.street}, ${user.address.city}',
+                            ),
+                            Text('ZIP: ${user.address.zipcode}'),
+                          ],
+                        ),
+                      ),
+                      const Divider(),
+                      ListTile(
+                        leading: const Icon(Icons.map),
+                        title: const Text('Geo Location'),
+                        subtitle: Text(
+                          'Lat: ${user.address.geolocation.lat}, Long: ${user.address.geolocation.long}',
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
+}
+
+
+products_screen
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../features/auth/notifiers/auth_notifier.dart';
+import '../../features/products/notifiers/local_products_notifier.dart';
+import '../../features/products/notifiers/remote_products_notifier.dart';
+import '../auth/login_screen.dart';
+import '../auth/profile_screen.dart';
+
+class ProductsScreen extends ConsumerStatefulWidget {
+  const ProductsScreen({super.key});
+
+  @override
+  ConsumerState<ProductsScreen> createState() => _ProductsScreenState();
+}
+
+class _ProductsScreenState extends ConsumerState<ProductsScreen>
+    with TickerProviderStateMixin {
+  late final TabController _tabController;
+  final TextEditingController _searchController = TextEditingController();
+
+  late final ScrollController _scrollController;
+  bool _showBackToTop = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _tabController = TabController(length: 2, vsync: this);
+    _tabController.addListener(() => setState(() {}));
+    _scrollController = ScrollController();
+    _scrollController.addListener(() {
+      if (_scrollController.offset > 100 && !_showBackToTop) {
+        setState(() => _showBackToTop = true);
+      } else if (_scrollController.offset <= 100 && _showBackToTop) {
+        setState(() => _showBackToTop = false);
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _tabController.dispose();
+    _searchController.dispose();
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _onRefresh() async {
+    await Future.wait([
+      ref.read(remoteProductsNotifierProvider.notifier).fetchRemoteProducts(),
+      ref.read(localProductsNotifierProvider.notifier).fetchLocalProducts(),
+    ]);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final remoteAsync = ref.watch(remoteProductsNotifierProvider);
+    final localAsync = ref.watch(localProductsNotifierProvider);
+
+    return Scaffold(
+      backgroundColor: Colors.grey[50],
+      body: NestedScrollView(
+        controller: _scrollController,
+        headerSliverBuilder: (context, innerBoxIsScrolled) => [
+          SliverAppBar(
+            pinned: true,
+            floating: true,
+            snap: false,
+            expandedHeight: 220,
+            backgroundColor: Colors.white,
+            surfaceTintColor: Colors.white,
+            elevation: 0,
+            centerTitle: false,
+            title: const Text(
+              "D'razi",
+              style: TextStyle(
+                fontSize: 28,
+                fontWeight: FontWeight.w900,
+                color: Colors.black87,
+              ),
+            ),
+            actions: [
+              IconButton(
+                onPressed: () {
+                  final auth = ref.read(authNotifierProvider.notifier);
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => auth.isAuthenticated
+                          ? const ProfileScreen()
+                          : const LoginScreen(),
+                    ),
+                  );
+                },
+                icon: const Icon(Icons.person_outline, color: Colors.black87),
+              ),
+            ],
+            flexibleSpace: FlexibleSpaceBar(
+              collapseMode: CollapseMode.pin,
+              background: SafeArea(
+                child: Column(
+                  children: [
+                    const SizedBox(height: 56),
+                    _buildSearchBar(),
+                    _buildCategoryChips(),
+                  ],
+                ),
+              ),
+            ),
+            bottom: TabBar(
+              controller: _tabController,
+              indicatorColor: theme.primaryColor,
+              indicatorWeight: 3,
+              labelColor: Colors.black,
+              unselectedLabelColor: Colors.grey,
+              indicatorSize: TabBarIndicatorSize.label,
+              tabs: const [
+                Tab(text: "Remote"),
+                Tab(text: "Local"),
+              ],
+            ),
+          ),
+        ],
+        body: TabBarView(
+          controller: _tabController,
+          children: [
+            _buildProductGrid(remoteAsync, isRemote: true),
+            _buildProductGrid(localAsync, isRemote: false),
+          ],
+        ),
+      ),
+      floatingActionButton: _showBackToTop
+          ? FloatingActionButton(
+              onPressed: () {
+                _scrollController.animateTo(
+                  0,
+                  duration: const Duration(milliseconds: 500),
+                  curve: Curves.easeOut,
+                );
+              },
+              child: const Icon(Icons.arrow_upward),
+            )
+          : null,
+    );
+  }
+
+  Widget _buildSearchBar() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+      child: TextField(
+        controller: _searchController,
+        onChanged: (val) {
+          final query = val.isEmpty ? null : val;
+          if (_tabController.index == 0) {
+            ref
+                .read(remoteProductsNotifierProvider.notifier)
+                .setSearchQuery(query);
+          } else {
+            ref
+                .read(localProductsNotifierProvider.notifier)
+                .setSearchQuery(query);
+          }
+          setState(() {}); // needed to rebuild suffix icon visibility
+        },
+        decoration: InputDecoration(
+          hintText: "Search products...",
+          prefixIcon: const Icon(Icons.search, size: 20),
+          suffixIcon: _searchController.text.isEmpty
+              ? null
+              : IconButton(
+                  icon: const Icon(Icons.clear, size: 20),
+                  onPressed: () {
+                    _searchController.clear();
+                    if (_tabController.index == 0) {
+                      ref
+                          .read(remoteProductsNotifierProvider.notifier)
+                          .setSearchQuery(null);
+                    } else {
+                      ref
+                          .read(localProductsNotifierProvider.notifier)
+                          .setSearchQuery(null);
+                    }
+                    setState(() {}); // rebuild to hide clear button
+                  },
+                ),
+          filled: true,
+          fillColor: Colors.grey[100],
+          contentPadding: EdgeInsets.zero,
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(12),
+            borderSide: BorderSide.none,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildCategoryChips() {
+    final categories = _tabController.index == 0
+        ? ref.read(remoteProductsNotifierProvider.notifier).getCategories()
+        : ref.read(localProductsNotifierProvider.notifier).getCategories();
+    final selected = _tabController.index == 0
+        ? ref
+              .read(remoteProductsNotifierProvider.notifier)
+              .getSelectedCategory()
+        : ref
+              .read(localProductsNotifierProvider.notifier)
+              .getSelectedCategory();
+
+    return SizedBox(
+      height: 50,
+      child: ListView.builder(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 16),
+        itemCount: categories.length,
+        itemBuilder: (_, index) {
+          final cat = categories[index];
+          final isSelected = cat == selected;
+          return Padding(
+            padding: const EdgeInsets.only(right: 8),
+            child: ChoiceChip(
+              label: Text(cat),
+              selected: isSelected,
+              selectedColor: Colors.black87,
+              labelStyle: TextStyle(
+                color: isSelected ? Colors.white : Colors.black87,
+                fontSize: 13,
+              ),
+              onSelected: (_) {
+                _tabController.index == 0
+                    ? ref
+                          .read(remoteProductsNotifierProvider.notifier)
+                          .setSelectedCategory(isSelected ? null : cat)
+                    : ref
+                          .read(localProductsNotifierProvider.notifier)
+                          .setSelectedCategory(isSelected ? null : cat);
+                setState(() {});
+              },
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildProductGrid(AsyncValue asyncState, {required bool isRemote}) {
+    return RefreshIndicator(
+      onRefresh: _onRefresh,
+      child: asyncState.when(
+        loading: () =>
+            const Center(child: CircularProgressIndicator.adaptive()),
+        error: (e, _) => Center(child: Text("Failed to load products: $e")),
+        data: (_) {
+          final products = isRemote
+              ? ref
+                    .read(remoteProductsNotifierProvider.notifier)
+                    .getFilteredProducts()
+              : ref
+                    .read(localProductsNotifierProvider.notifier)
+                    .getFilteredProducts();
+
+          if (products.isEmpty) {
+            return const Center(child: Text("No products found."));
+          }
+
+          return GridView.builder(
+            padding: const EdgeInsets.all(16),
+            // Bouncing physics makes the refresh indicator feel native
+            physics: const BouncingScrollPhysics(),
+            gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+              crossAxisCount: 2,
+              mainAxisSpacing: 16,
+              crossAxisSpacing: 16,
+              childAspectRatio: 0.75,
+            ),
+            itemCount: products.length,
+            itemBuilder: (_, index) {
+              final product = products[index];
+              // Check if product is saved (if remote, check against local list)
+              final isSaved =
+                  !isRemote ||
+                  (ref
+                          .watch(localProductsNotifierProvider)
+                          .value
+                          ?.any((p) => p.id == product.id) ??
+                      false);
+
+              return _ProductCard(
+                product: product,
+                isSaved: isSaved,
+                onFavorite: () => ref
+                    .read(localProductsNotifierProvider.notifier)
+                    .toggleSaved(product.id),
+              );
+            },
+          );
+        },
+      ),
+    );
+  }
+}
+
+class _ProductCard extends StatelessWidget {
+  final dynamic product;
+  final bool isSaved;
+  final VoidCallback onFavorite;
+
+  const _ProductCard({
+    required this.product,
+    required this.isSaved,
+    required this.onFavorite,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Expanded(
+            child: Stack(
+              children: [
+                ClipRRect(
+                  borderRadius: const BorderRadius.vertical(
+                    top: Radius.circular(16),
+                  ),
+                  child: Center(
+                    child: Padding(
+                      padding: const EdgeInsets.all(12),
+                      child: Image.network(
+                        product.image,
+                        fit: BoxFit.contain,
+                        errorBuilder: (_, _, _) =>
+                            const Icon(Icons.broken_image),
+                      ),
+                    ),
+                  ),
+                ),
+                Positioned(
+                  top: 8,
+                  right: 8,
+                  child: IconButton.filledTonal(
+                    onPressed: onFavorite,
+                    icon: Icon(
+                      isSaved ? Icons.favorite : Icons.favorite_border,
+                      color: isSaved ? Colors.red : Colors.grey,
+                      size: 20,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  product.title,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w600,
+                    fontSize: 14,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  "\$${product.price}",
+                  style: TextStyle(
+                    fontWeight: FontWeight.bold,
+                    color: Theme.of(context).primaryColor,
+                    fontSize: 16,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
